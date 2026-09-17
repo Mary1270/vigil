@@ -149,3 +149,19 @@ reputation loop (tier selection driven by live reputation, both
 CONFIRMED and REJECTED deltas). `DisputePanel` and the full three-contract
 wiring are treated as live-verified only, per §4 below, which is the
 authoritative proof for the portal submission regardless.
+
+One more Direct-Mode-only behavior, found getting the reputation-loop
+tests green: `direct_vm.mock_llm(pattern, response)` auto-parses a
+JSON-shaped mocked string and delivers a Python `dict` to
+`gl.nondet.exec_prompt`'s caller, instead of the raw string real GenVM
+always returns (confirmed live on Studio, §4 below — every
+`exec_prompt` call there returned a string, which `_extract_json_object`
+then stripped and parsed). `_extract_json_object` in `claim_verifier.py`
+and `dispute_panel.py` was made defensive to accept either type (`if
+isinstance(text, dict): return json.dumps(text)`), purely additive and
+never exercised on real GenVM, where this function only ever receives a
+string. **This does mean the repo's contract source is now one small,
+backward-compatible line different from the exact bytes already deployed
+live at the addresses in the README** — the live deployment was
+verified before this line existed and remains valid; only a future
+redeployment would pick up this defensive tweak.
