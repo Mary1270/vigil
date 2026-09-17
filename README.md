@@ -31,11 +31,11 @@ Live-verified GenVM findings are recorded in
 
 ## Deployed addresses (GenLayer Studio)
 
-| Contract | Address |
-|---|---|
-| ReputationLedger | `0x9544144caf6ACe52c5BCE6effE8b05dE0fAf0C3e` |
-| ClaimVerifier | `0xc280b1029dFB4167f24BbecC1C893137E4B432b8` |
-| DisputePanel | `0x08B886927Dc77CA1B1d745ED6DB8e54e7C08F559` |
+| Contract | Address | Explorer |
+|---|---|---|
+| ReputationLedger | `0x9544144caf6ACe52c5BCE6effE8b05dE0fAf0C3e` | [view](https://explorer-studio.genlayer.com/address/0x9544144caf6ACe52c5BCE6effE8b05dE0fAf0C3e) |
+| ClaimVerifier | `0xc280b1029dFB4167f24BbecC1C893137E4B432b8` | [view](https://explorer-studio.genlayer.com/address/0xc280b1029dFB4167f24BbecC1C893137E4B432b8) |
+| DisputePanel | `0x08B886927Dc77CA1B1d745ED6DB8e54e7C08F559` | [view](https://explorer-studio.genlayer.com/address/0x08B886927Dc77CA1B1d745ED6DB8e54e7C08F559) |
 
 ## Repository structure
 
