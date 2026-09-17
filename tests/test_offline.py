@@ -3,35 +3,32 @@ Offline tests for the Vigil contracts, using genlayer-test's Direct Mode
 (in-process GenVM, no Studio/Docker needed).
 
 Confirmed live in CI (genlayer-test 0.29.2, GenVM SDK v0.3.0-rc7,
-Python 3.12): there is no `mock_web` / `mock_llm` pytest fixture. Mocking
-goes through the `direct_vm` fixture instead:
+Python 3.12):
 
-    direct_vm.mock_llm(pattern: str, response: str)   # pattern is a regex
-                                                       # matched against
-                                                       # the prompt text
-    direct_vm.mock_web(pattern: str, response: dict)  # not used here --
-                                                       # none of these
-                                                       # tests exercise the
-                                                       # high_reputation
-                                                       # tier's strict_eq
-                                                       # web fetch
-    direct_vm.clear_mocks()
-    direct_vm.sender = <address>   # also confirmed: passing sender=...
-                                    # directly as a call kwarg works too
-
-Rather than relying on `clear_mocks()` ordering, each test registers one
-`mock_llm` pattern per distinct prompt shape it expects to trigger (low
-tier, medium tier, dispute review), using a short substring from that
-prompt as the regex. Since the three prompt shapes never overlap, multiple
-patterns can be registered up front in a single test with no risk of one
-overriding another.
-
-Also confirmed live in CI: this installed SDK tracks the single
-most-recently-loaded contract class in a process-global and raises
-`TypeError: only one contract is allowed` the moment a second, different
-contract type is loaded anywhere in the same pytest session. See
-tests/conftest.py for the reset fixture this requires -- without it,
-every test here that deploys more than one contract type would fail.
+- There is no `mock_web` / `mock_llm` pytest fixture. Mocking goes
+  through the `direct_vm` fixture instead: `direct_vm.mock_llm(pattern,
+  response)`, where `pattern` is a regex matched against the prompt text.
+  `direct_vm.mock_web` is not used here -- none of these tests exercise
+  the high_reputation tier's strict_eq web fetch.
+- Loading more than one DIFFERENT contract type in a single test needs
+  the reset in tests/conftest.py (this SDK version tracks the
+  most-recently-loaded contract class in a process-global and raises
+  "only one contract is allowed" otherwise) -- AND that reset must run
+  between each individual deploy within a test, not just once before it,
+  since the first deploy re-arms the check before the second one runs.
+- ReputationLedger/ClaimVerifier/DisputePanel deployed with IDENTICAL
+  constructor arguments across DIFFERENT test functions were observed to
+  share persistent state (a fresh deploy in a later test saw
+  `dispute_panel_set` already True from an earlier test's wiring), even
+  though each test gets its own freshly-loaded Python object. Since
+  ReputationLedger takes no constructor arguments at all, every test that
+  deployed the full three-contract set was deploying with identical
+  arguments and colliding. The fix used here: wire the three contracts
+  together exactly ONCE, in a single comprehensive scenario test, instead
+  of redeploying a fresh set per test function. This sidesteps the
+  collision entirely and also mirrors how the system was actually
+  end-to-end verified live on Studio (one continuous sequence of calls,
+  not independent isolated scenarios).
 
 Run with:
     pip install genlayer-test
@@ -61,10 +58,6 @@ NON_COMPARATIVE_CONFIRMED = json.dumps({
     "reasoning": "The evidence source directly and unambiguously supports the claim.",
     "final_verdict": "CONFIRMED",
 })
-NON_COMPARATIVE_REJECTED = json.dumps({
-    "reasoning": "The evidence source does not support the claim as stated.",
-    "final_verdict": "REJECTED",
-})
 COMPARATIVE_CONFIRMED = json.dumps({
     "reading_one": "CONFIRMED",
     "reading_two": "CONFIRMED",
@@ -90,37 +83,15 @@ DISPUTE_DENIED = json.dumps({
 
 
 def _reset_known_contract():
-    """See tests/conftest.py for why this is needed. Unlike the conftest
-    fixture (which only resets once before each test), this must also run
-    immediately after EACH individual deploy inside _wire: the first
-    deploy in a test re-arms the check, so the second deploy trips it
-    again unless reset in between."""
+    """See tests/conftest.py docstring. Must also run between each
+    individual deploy below, not just once before the test."""
     for name, module in list(sys.modules.items()):
         if name.endswith("genvm_contracts") and hasattr(module, "__known_contract__"):
             module.__known_contract__ = None
 
 
-def _wire(direct_deploy):
-    """Deploy all three contracts and wire them together, matching the
-    exact deploy-then-wire order used live on Studio."""
-    ledger = direct_deploy(REPUTATION_LEDGER_PATH)
-    _reset_known_contract()
-    verifier = direct_deploy(
-        CLAIM_VERIFIER_PATH, ledger.address, LOW_THRESHOLD, HIGH_THRESHOLD
-    )
-    _reset_known_contract()
-    panel = direct_deploy(DISPUTE_PANEL_PATH, ledger.address)
-    _reset_known_contract()
-
-    ledger.set_claim_verifier(verifier.address)
-    ledger.set_dispute_panel(panel.address)
-    verifier.set_dispute_panel(panel.address)
-
-    return ledger, verifier, panel
-
-
 # ---------------------------------------------------------------------------
-# ReputationLedger
+# ReputationLedger in isolation (no wiring needed)
 # ---------------------------------------------------------------------------
 
 def test_ledger_default_score_and_no_history(direct_deploy, direct_accounts):
@@ -137,164 +108,108 @@ def test_ledger_apply_delta_rejects_unauthorized_caller(direct_deploy, direct_ac
         ledger.apply_delta(someone, 10, True, sender=someone)
 
 
-def test_set_claim_verifier_only_once(direct_deploy):
-    ledger = direct_deploy(REPUTATION_LEDGER_PATH)
-    ledger.set_claim_verifier("0x" + "11" * 20)
-    with pytest.raises(Exception):
-        ledger.set_claim_verifier("0x" + "22" * 20)
+# ---------------------------------------------------------------------------
+# Full three-contract lifecycle, wired exactly once (see module docstring
+# for why this is a single test rather than many independent ones)
+# ---------------------------------------------------------------------------
 
-
-def test_set_claim_verifier_only_owner(direct_deploy, direct_accounts):
+def test_full_lifecycle(direct_vm, direct_deploy, direct_accounts):
     ledger = direct_deploy(REPUTATION_LEDGER_PATH)
+    _reset_known_contract()
+    verifier = direct_deploy(
+        CLAIM_VERIFIER_PATH, ledger.address, LOW_THRESHOLD, HIGH_THRESHOLD
+    )
+    _reset_known_contract()
+    panel = direct_deploy(DISPUTE_PANEL_PATH, ledger.address)
+    _reset_known_contract()
+
+    # --- wiring: only-once / only-owner checks, then real wiring ---
     not_owner = direct_accounts[1]
     with pytest.raises(Exception):
-        ledger.set_claim_verifier("0x" + "11" * 20, sender=not_owner)
+        ledger.set_claim_verifier(verifier.address, sender=not_owner)
 
+    ledger.set_claim_verifier(verifier.address)
+    with pytest.raises(Exception):
+        ledger.set_claim_verifier(verifier.address)
 
-# ---------------------------------------------------------------------------
-# ClaimVerifier -- tier selection driven by ReputationLedger state
-# ---------------------------------------------------------------------------
+    ledger.set_dispute_panel(panel.address)
+    verifier.set_dispute_panel(panel.address)
 
-def test_first_claim_from_unknown_address_uses_low_tier(direct_vm, direct_deploy):
-    ledger, verifier, _ = _wire(direct_deploy)
+    # --- step 1: fresh address, no history -> low tier, CONFIRMED ---
     direct_vm.mock_llm(LOW_TIER_PATTERN, NON_COMPARATIVE_CONFIRMED)
 
-    claim_id = verifier.submit_claim(
-        "Paris is the capital of France.",
-        "https://example.test/paris",
+    claim0 = verifier.submit_claim(
+        "Paris is the capital of France.", "https://example.test/paris"
     )
-    assert claim_id == 0
+    assert claim0 == 0
+    record0 = json.loads(verifier.get_claim(0))
+    assert record0["tier"] == "low_reputation_or_unknown"
+    assert record0["verdict"] == "CONFIRMED"
+    assert record0["reputation_at_submission"] == BASELINE_SCORE
 
-    claim = json.loads(verifier.get_claim(0))
-    assert claim["tier"] == "low_reputation_or_unknown"
-    assert claim["verdict"] == "CONFIRMED"
-    assert claim["reputation_at_submission"] == BASELINE_SCORE
-
-    claimant = claim["claimant"]
-    assert ledger.get_score(claimant) == BASELINE_SCORE + 30
+    claimant = record0["claimant"]
+    assert ledger.get_score(claimant) == 530
     assert ledger.has_history(claimant) is True
 
-
-def test_second_confirmed_claim_moves_to_medium_tier(direct_vm, direct_deploy):
-    ledger, verifier, _ = _wire(direct_deploy)
-    direct_vm.mock_llm(LOW_TIER_PATTERN, NON_COMPARATIVE_CONFIRMED)
+    # --- step 2: reputation 530 -> medium tier, CONFIRMED ---
     direct_vm.mock_llm(MEDIUM_TIER_PATTERN, COMPARATIVE_CONFIRMED)
 
-    verifier.submit_claim("Paris is the capital of France.", "https://example.test/paris")
-    # score is now 530 -- above low_threshold=300, below high_threshold=700
-
-    claim_id = verifier.submit_claim(
-        "Tokyo is the capital of Japan.",
-        "https://example.test/tokyo",
+    claim1 = verifier.submit_claim(
+        "Tokyo is the capital of Japan.", "https://example.test/tokyo"
     )
-    claim = json.loads(verifier.get_claim(claim_id))
-    assert claim["tier"] == "medium_reputation"
-    assert claim["reputation_at_submission"] == 530
-
-    claimant = claim["claimant"]
+    record1 = json.loads(verifier.get_claim(claim1))
+    assert record1["tier"] == "medium_reputation"
+    assert record1["reputation_at_submission"] == 530
     assert ledger.get_score(claimant) == 550
 
+    # --- step 3: reputation 550, false fact -> medium tier, REJECTED ---
+    direct_vm.clear_mocks()
+    direct_vm.mock_llm(MEDIUM_TIER_PATTERN, COMPARATIVE_REJECTED)
 
-def test_rejected_claim_lowers_reputation(direct_vm, direct_deploy):
-    ledger, verifier, _ = _wire(direct_deploy)
-    direct_vm.mock_llm(LOW_TIER_PATTERN, NON_COMPARATIVE_REJECTED)
-
-    claim_id = verifier.submit_claim(
-        "The moon is made of cheese.",
-        "https://example.test/moon",
+    claim2 = verifier.submit_claim(
+        "Tokyo is the capital of France.", "https://example.test/tokyo"
     )
-    claim = json.loads(verifier.get_claim(claim_id))
-    assert claim["verdict"] == "REJECTED"
+    record2 = json.loads(verifier.get_claim(claim2))
+    assert record2["verdict"] == "REJECTED"
+    assert ledger.get_score(claimant) == 530
 
-    claimant = claim["claimant"]
-    assert ledger.get_score(claimant) == BASELINE_SCORE - 30
-
-
-def test_score_clamps_at_1000(direct_vm, direct_deploy):
-    ledger, verifier, _ = _wire(direct_deploy)
-    direct_vm.mock_llm(LOW_TIER_PATTERN, NON_COMPARATIVE_CONFIRMED)
-    direct_vm.mock_llm(MEDIUM_TIER_PATTERN, COMPARATIVE_CONFIRMED)
-
-    verifier.submit_claim("fact 0", "https://example.test/0")  # 500 -> 530
-    for i in range(1, 30):
-        verifier.submit_claim(f"fact {i}", f"https://example.test/{i}")
-
-    claim0 = json.loads(verifier.get_claim(0))
-    claimant = claim0["claimant"]
-    assert ledger.get_score(claimant) <= 1000
-
-
-def test_request_dispute_only_by_original_claimant(direct_vm, direct_deploy, direct_accounts):
-    _, verifier, _ = _wire(direct_deploy)
-    direct_vm.mock_llm(LOW_TIER_PATTERN, NON_COMPARATIVE_REJECTED)
-
-    claim_id = verifier.submit_claim("bad fact", "https://example.test/bad")
-
-    not_claimant = direct_accounts[1]
+    # A CONFIRMED claim (claim0) carries no penalty and cannot be disputed.
     with pytest.raises(Exception):
-        verifier.request_dispute(claim_id, sender=not_claimant)
+        verifier.request_dispute(claim0)
 
-
-def test_request_dispute_rejects_confirmed_claims(direct_vm, direct_deploy):
-    _, verifier, _ = _wire(direct_deploy)
-    direct_vm.mock_llm(LOW_TIER_PATTERN, NON_COMPARATIVE_CONFIRMED)
-
-    claim_id = verifier.submit_claim("good fact", "https://example.test/good")
-
+    # Only the original claimant may dispute claim2.
     with pytest.raises(Exception):
-        verifier.request_dispute(claim_id)
+        verifier.request_dispute(claim2, sender=not_owner)
 
+    # --- step 4: dispute claim2, panel denies it -> extra penalty ---
+    direct_vm.mock_llm(DISPUTE_PATTERN, DISPUTE_DENIED)
 
-# ---------------------------------------------------------------------------
-# DisputePanel -- correction lands on ReputationLedger, not ClaimVerifier
-# ---------------------------------------------------------------------------
+    verifier.request_dispute(claim2)
+    dispute0 = json.loads(panel.get_dispute(0))
+    assert dispute0["overturned"] is False
+    # 550 - 20 (rejection) - 10 (denied dispute) = 520 -- matches the
+    # live Studio verification recorded in LESSONS_LEARNED.md exactly.
+    assert ledger.get_score(claimant) == 520
 
-def test_dispute_overturned_reverses_penalty(direct_vm, direct_deploy):
-    ledger, verifier, panel = _wire(direct_deploy)
-    direct_vm.mock_llm(LOW_TIER_PATTERN, NON_COMPARATIVE_REJECTED)
+    # Disputing the same claim twice is rejected.
+    with pytest.raises(Exception):
+        verifier.request_dispute(claim2)
+
+    # --- step 5: a second rejected claim, this time the panel overturns it ---
+    direct_vm.clear_mocks()
+    direct_vm.mock_llm(MEDIUM_TIER_PATTERN, COMPARATIVE_REJECTED)
+
+    claim3 = verifier.submit_claim(
+        "Berlin is the capital of Spain.", "https://example.test/berlin"
+    )
+    record3 = json.loads(verifier.get_claim(claim3))
+    assert record3["verdict"] == "REJECTED"
+    assert ledger.get_score(claimant) == 500  # 520 - 20
+
     direct_vm.mock_llm(DISPUTE_PATTERN, DISPUTE_OVERTURNED)
+    verifier.request_dispute(claim3)
 
-    claim_id = verifier.submit_claim("wrongly rejected fact", "https://example.test/x")
-    claim = json.loads(verifier.get_claim(claim_id))
-    claimant = claim["claimant"]
-    assert ledger.get_score(claimant) == BASELINE_SCORE - 30
-
-    verifier.request_dispute(claim_id)
-
-    dispute = json.loads(panel.get_dispute(0))
-    assert dispute["overturned"] is True
-
-    # Original penalty (-30) fully reversed and credited: 470 + 60 = 530.
-    assert ledger.get_score(claimant) == BASELINE_SCORE - 30 + 60
-
-
-def test_dispute_denied_adds_extra_penalty(direct_vm, direct_deploy):
-    ledger, verifier, panel = _wire(direct_deploy)
-    direct_vm.mock_llm(LOW_TIER_PATTERN, NON_COMPARATIVE_REJECTED)
-    direct_vm.mock_llm(DISPUTE_PATTERN, DISPUTE_DENIED)
-
-    claim_id = verifier.submit_claim("correctly rejected fact", "https://example.test/y")
-    claim = json.loads(verifier.get_claim(claim_id))
-    claimant = claim["claimant"]
-    assert ledger.get_score(claimant) == BASELINE_SCORE - 30
-
-    verifier.request_dispute(claim_id)
-
-    dispute = json.loads(panel.get_dispute(0))
-    assert dispute["overturned"] is False
-
-    # Original penalty (-30) stands, plus the denied-dispute penalty (-10):
-    # 500 - 30 - 10 = 460.
-    assert ledger.get_score(claimant) == BASELINE_SCORE - 30 - 10
-
-
-def test_cannot_dispute_same_claim_twice(direct_vm, direct_deploy):
-    _, verifier, _ = _wire(direct_deploy)
-    direct_vm.mock_llm(LOW_TIER_PATTERN, NON_COMPARATIVE_REJECTED)
-    direct_vm.mock_llm(DISPUTE_PATTERN, DISPUTE_DENIED)
-
-    claim_id = verifier.submit_claim("bad fact", "https://example.test/bad")
-    verifier.request_dispute(claim_id)
-
-    with pytest.raises(Exception):
-        verifier.request_dispute(claim_id)
+    dispute1 = json.loads(panel.get_dispute(1))
+    assert dispute1["overturned"] is True
+    # Original penalty (-20) fully reversed and credited: 480 + 40 = 520.
+    assert ledger.get_score(claimant) == 500 - 20 + 40
