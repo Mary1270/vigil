@@ -19,7 +19,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install pytest genlayer-test
 
+      - name: Pre-cache GenVM SDK tarball
+        run: |
+          mkdir -p ~/.cache/gltest-direct
+          curl -fLsS \
+            https://github.com/genlayerlabs/genvm/releases/download/v0.3.0-rc7/genvm-runners-all.tar.xz \
+            -o ~/.cache/gltest-direct/genvm-universal-v0.3.0-rc7.tar.xz
+
       - name: Run offline tests
-        env:
-          GENVM_VERSION: v0.2.16
         run: pytest tests/ -v
