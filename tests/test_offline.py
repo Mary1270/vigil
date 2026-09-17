@@ -39,6 +39,8 @@ Run with:
 """
 
 import json
+import sys
+
 import pytest
 
 
@@ -87,14 +89,28 @@ DISPUTE_DENIED = json.dumps({
 })
 
 
+def _reset_known_contract():
+    """See tests/conftest.py for why this is needed. Unlike the conftest
+    fixture (which only resets once before each test), this must also run
+    immediately after EACH individual deploy inside _wire: the first
+    deploy in a test re-arms the check, so the second deploy trips it
+    again unless reset in between."""
+    for name, module in list(sys.modules.items()):
+        if name.endswith("genvm_contracts") and hasattr(module, "__known_contract__"):
+            module.__known_contract__ = None
+
+
 def _wire(direct_deploy):
     """Deploy all three contracts and wire them together, matching the
     exact deploy-then-wire order used live on Studio."""
     ledger = direct_deploy(REPUTATION_LEDGER_PATH)
+    _reset_known_contract()
     verifier = direct_deploy(
         CLAIM_VERIFIER_PATH, ledger.address, LOW_THRESHOLD, HIGH_THRESHOLD
     )
+    _reset_known_contract()
     panel = direct_deploy(DISPUTE_PANEL_PATH, ledger.address)
+    _reset_known_contract()
 
     ledger.set_claim_verifier(verifier.address)
     ledger.set_dispute_panel(panel.address)
