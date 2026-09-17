@@ -13,7 +13,9 @@ def _normalize_address(value) -> Address:
     return Address(value)
 
 
-def _extract_json_object(text: str) -> str:
+def _extract_json_object(text) -> str:
+    if isinstance(text, dict):
+        return json.dumps(text)
     t = text.strip()
     if t.startswith("```"):
         lines = t.split("\n")
