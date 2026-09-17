@@ -99,19 +99,53 @@ attempt, with no reordering needed.
 - `ClaimVerifier`: `0xc280b1029dFB4167f24BbecC1C893137E4B432b8`
 - `DisputePanel`: `0x08B886927Dc77CA1B1d745ED6DB8e54e7C08F559`
 
-## 7. Offline test harness — status honestly disclosed
+## 7. Offline test harness — confirmed findings from CI
 
-`tests/test_offline.py` was written but not run in this environment (no
-network access to `pip install genlayer-test` here). It is wired into
-GitHub Actions (`.github/workflows/tests.yml`) instead, since local
-execution is not available from a mobile-only GitHub workflow. Several
-tests assume `mock_llm.set_response(...)` can be called more than once
-within a single test to supply different LLM responses to different
-calls in the same test (e.g. one response for `submit_claim`, a different
-one for the subsequent `request_dispute`) — this assumption is flagged
-explicitly in the test file's docstring and has not yet been confirmed
-against the actual installed `genlayer-test` version. If Actions reports
-a failure tied to this, the fix is to adjust those specific tests to
-match whatever the real mock interface requires — the live on-chain
-results in §4 above are unaffected either way, since they were captured
-directly from Studio, not from this offline harness.
+`tests/test_offline.py` was written, pushed, and iterated against real
+GitHub Actions runs (not run locally, since this environment has no
+network access) until green. What was actually found, live:
+
+- The installed `genlayer-test` (0.29.2, GenVM SDK v0.3.0-rc7) defaults
+  to a GenVM release tag whose `genvm-universal.tar.xz` asset is missing
+  (404). Fixed by pre-caching the correctly-named file in
+  `~/.cache/gltest-direct/` from that same release's differently-named
+  `genvm-runners-all.tar.xz` asset, before pytest runs (see
+  `.github/workflows/tests.yml`).
+- There is no `mock_web` / `mock_llm` pytest fixture, despite this being
+  a reasonable-sounding guess. Mocking is a method on the `direct_vm`
+  fixture instead: `direct_vm.mock_llm(pattern, response)`, where
+  `pattern` is a regex matched against the prompt text.
+- This SDK version tracks the single most-recently-loaded contract class
+  in a process-global and raises `TypeError: only one contract is
+  allowed` the moment a second, different contract type is loaded
+  anywhere in the same pytest process. Loading a second contract type
+  requires manually resetting that global
+  (`genlayer.gl.genvm_contracts.__known_contract__ = None`) immediately
+  after each individual deploy, not just once before the test — the
+  first deploy re-arms the check before the second one runs. See
+  `tests/conftest.py` and the `_reset_known_contract()` helper in
+  `tests/test_offline.py`.
+- A more specific, Direct-Mode-only bug: `ReputationLedger` and
+  `ClaimVerifier` both declare a boolean field named `dispute_panel_set`
+  (each contract's own one-time wiring guard). Calling
+  `ledger.set_dispute_panel(...)` immediately before
+  `verifier.set_dispute_panel(...)` makes the second call fail with
+  "dispute panel already set" — on a freshly-deployed verifier that had
+  never had that method called before. This points to Direct Mode's
+  storage simulation not fully namespacing same-named fields across
+  different contract types loaded in the same process. It is not a real
+  GenVM bug: the identical wiring sequence was confirmed working
+  correctly against real GenVM consensus live on Studio (§4/§5 below).
+  Renaming the field would only work around a test-harness artifact at
+  the cost of no longer matching what is actually deployed live, so the
+  contract source was left as-is and DisputePanel wiring was excluded
+  from the offline suite rather than worked around. `test_offline.py`
+  documents this in full at the top of the file.
+
+Given the above, the offline suite's final scope is `ReputationLedger`
+in isolation (default score, unauthorized-caller rejection, one-time/
+owner-gated wiring) and the `ClaimVerifier` + `ReputationLedger`
+reputation loop (tier selection driven by live reputation, both
+CONFIRMED and REJECTED deltas). `DisputePanel` and the full three-contract
+wiring are treated as live-verified only, per §4 below, which is the
+authoritative proof for the portal submission regardless.
