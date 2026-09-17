@@ -45,7 +45,12 @@ contracts/
   claim_verifier.py
   dispute_panel.py
 tests/
-  test_offline.py
+  genlayer_stub/genlayer/__init__.py   # offline SDK stub (see LESSONS_LEARNED.md)
+  _bootstrap.py
+  test_reputation_ledger.py
+  test_claim_verifier.py
+  test_dispute_panel.py
+  test_end_to_end.py
 .github/
   workflows/
     tests.yml
@@ -56,12 +61,17 @@ README.md
 
 ## Testing
 
-Offline tests run automatically on every push via GitHub Actions (see
+Offline tests run against a small, hand-written pure-Python stub of the
+`genlayer` SDK (`tests/genlayer_stub/`) rather than `genlayer-test`'s
+Direct Mode, which was confirmed live in CI not to execute real
+cross-contract calls at all — see `LESSONS_LEARNED.md` §7 for the full
+story. No GenVM binary or network access is needed to run them. They run
+automatically on every push via GitHub Actions (see
 `.github/workflows/tests.yml`); results appear in the repository's
 **Actions** tab. To run them locally instead:
 
 ```bash
-pip install genlayer-test
+pip install pytest
 pytest tests/ -v
 ```
 

@@ -99,69 +99,84 @@ attempt, with no reordering needed.
 - `ClaimVerifier`: `0xc280b1029dFB4167f24BbecC1C893137E4B432b8`
 - `DisputePanel`: `0x08B886927Dc77CA1B1d745ED6DB8e54e7C08F559`
 
-## 7. Offline test harness — confirmed findings from CI
+## 7. Offline test harness — final approach (genlayer-test's Direct Mode abandoned)
 
-`tests/test_offline.py` was written, pushed, and iterated against real
-GitHub Actions runs (not run locally, since this environment has no
-network access) until green. What was actually found, live:
+Getting `tests/test_offline.py` green through `genlayer-test`'s Direct
+Mode took many CI round-trips and surfaced four real, confirmed findings
+before hitting a wall that Direct Mode itself cannot get past:
 
 - The installed `genlayer-test` (0.29.2, GenVM SDK v0.3.0-rc7) defaults
-  to a GenVM release tag whose `genvm-universal.tar.xz` asset is missing
-  (404). Fixed by pre-caching the correctly-named file in
-  `~/.cache/gltest-direct/` from that same release's differently-named
-  `genvm-runners-all.tar.xz` asset, before pytest runs (see
-  `.github/workflows/tests.yml`).
-- There is no `mock_web` / `mock_llm` pytest fixture, despite this being
-  a reasonable-sounding guess. Mocking is a method on the `direct_vm`
-  fixture instead: `direct_vm.mock_llm(pattern, response)`, where
-  `pattern` is a regex matched against the prompt text.
-- This SDK version tracks the single most-recently-loaded contract class
-  in a process-global and raises `TypeError: only one contract is
-  allowed` the moment a second, different contract type is loaded
-  anywhere in the same pytest process. Loading a second contract type
-  requires manually resetting that global
-  (`genlayer.gl.genvm_contracts.__known_contract__ = None`) immediately
-  after each individual deploy, not just once before the test — the
-  first deploy re-arms the check before the second one runs. See
-  `tests/conftest.py` and the `_reset_known_contract()` helper in
-  `tests/test_offline.py`.
-- A more specific, Direct-Mode-only bug: `ReputationLedger` and
-  `ClaimVerifier` both declare a boolean field named `dispute_panel_set`
-  (each contract's own one-time wiring guard). Calling
-  `ledger.set_dispute_panel(...)` immediately before
-  `verifier.set_dispute_panel(...)` makes the second call fail with
-  "dispute panel already set" — on a freshly-deployed verifier that had
-  never had that method called before. This points to Direct Mode's
-  storage simulation not fully namespacing same-named fields across
-  different contract types loaded in the same process. It is not a real
-  GenVM bug: the identical wiring sequence was confirmed working
-  correctly against real GenVM consensus live on Studio (§4/§5 below).
-  Renaming the field would only work around a test-harness artifact at
-  the cost of no longer matching what is actually deployed live, so the
-  contract source was left as-is and DisputePanel wiring was excluded
-  from the offline suite rather than worked around. `test_offline.py`
-  documents this in full at the top of the file.
+  to a GenVM release tag whose `genvm-universal.tar.xz` asset is
+  missing (404) — fixable by pre-caching a differently-named asset from
+  the same release.
+- There is no `mock_web` / `mock_llm` pytest fixture; mocking is a
+  method on the `direct_vm` fixture instead.
+- This SDK version tracks the single most-recently-loaded contract
+  class in a process-global and raises `TypeError: only one contract is
+  allowed` the moment a second, different contract type is loaded in
+  the same process — fixable by resetting that global between deploys.
+- `ReputationLedger` and `ClaimVerifier` sharing a field name
+  (`dispute_panel_set`) triggered a Direct-Mode-only storage collision
+  between the two contract types.
 
-Given the above, the offline suite's final scope is `ReputationLedger`
-in isolation (default score, unauthorized-caller rejection, one-time/
-owner-gated wiring) and the `ClaimVerifier` + `ReputationLedger`
-reputation loop (tier selection driven by live reputation, both
-CONFIRMED and REJECTED deltas). `DisputePanel` and the full three-contract
-wiring are treated as live-verified only, per §4 below, which is the
-authoritative proof for the portal submission regardless.
+The wall: **Direct Mode does not execute real cross-contract calls
+between two independently-deployed contracts at all.**
+`gl.get_contract_at(other_address).view().some_method()` was confirmed
+live in CI to return `None` instead of the real value (trace:
+`"Unknown gl_call request type: ['CallContract']"`), even though the
+identical call against the identical deployed contracts worked
+correctly against real GenVM consensus live on Studio (§4 above). This
+tracks with genlayer-test's own documentation, which describes Direct
+Mode as being for single-contract "Unit tests, rapid development,
+CI/CD" and Studio mode for "Integration tests, consensus validation" —
+it was never built to simulate a second deployed contract for a
+cross-contract call to route to. Since Vigil's entire mechanism is built
+on real cross-contract calls, none of it could be meaningfully exercised
+in Direct Mode, no matter how the wiring or mocking code was written.
 
-One more Direct-Mode-only behavior, found getting the reputation-loop
-tests green: `direct_vm.mock_llm(pattern, response)` auto-parses a
-JSON-shaped mocked string and delivers a Python `dict` to
-`gl.nondet.exec_prompt`'s caller, instead of the raw string real GenVM
-always returns (confirmed live on Studio, §4 below — every
-`exec_prompt` call there returned a string, which `_extract_json_object`
-then stripped and parsed). `_extract_json_object` in `claim_verifier.py`
-and `dispute_panel.py` was made defensive to accept either type (`if
-isinstance(text, dict): return json.dumps(text)`), purely additive and
-never exercised on real GenVM, where this function only ever receives a
-string. **This does mean the repo's contract source is now one small,
-backward-compatible line different from the exact bytes already deployed
-live at the addresses in the README** — the live deployment was
-verified before this line existed and remains valid; only a future
-redeployment would pick up this defensive tweak.
+**The fix, found by reviewing a sibling project:** MatchGuard (an
+earlier, single-contract project in this same series) uses a completely
+different offline-testing approach: a small, hand-written, pure-Python
+stub of the `genlayer` SDK's surface area (`tests/genlayer_stub/`),
+imported in place of the real package for tests, with no dependency on
+`genlayer-test`/GenVM at all. MatchGuard's stub never needed
+`get_contract_at` (single contract), but the rest of its design —
+`Address`, `TreeMap`/`DynArray`/`u256` stand-ins, no-op `@gl.public.write`/
+`@gl.public.view` decorators, a settable `gl.message.sender_address`,
+and `gl.nondet.web.render`/`gl.nondet.exec_prompt` raising by default so
+tests must explicitly mock them via `unittest.mock.patch.object` — was
+reused directly for Vigil's stub, with one addition: a small in-process
+contract registry plus a call-stack-aware proxy, so that
+`gl.get_contract_at(address).view()/.emit()` genuinely routes to the
+other real, already-deployed contract instance and correctly simulates
+GenVM's rule that `gl.message.sender_address`, inside the CALLED
+contract, is the calling CONTRACT's address (not the original human
+sender) — the one piece MatchGuard's single-contract stub never needed.
+
+This fully replaced `genlayer-test`/Direct Mode for Vigil. The CI
+workflow no longer installs `genlayer-test` or pre-caches any GenVM
+binary — just `pip install pytest`. All 21 offline tests
+(`tests/test_reputation_ledger.py`, `test_claim_verifier.py`,
+`test_dispute_panel.py`, `test_end_to_end.py`) run against the real
+cross-contract logic in all three contracts, including the full dispute
+lifecycle (both overturned and denied outcomes) and a dedicated
+end-to-end test that reproduces the exact live Studio sequence and
+final scores from §4 above (500 → 530 → 550 → 530 → 520). Every test
+was actually executed (not just syntax-checked) before being pushed,
+using a minimal local harness standing in for `pytest.raises`, since
+this environment itself has no network access to install real `pytest`.
+
+One honest limitation of this approach, stated plainly: this stub is a
+hand-written approximation of the real SDK's semantics, not the real
+GenVM runtime. It is a much better offline substitute than Direct Mode
+turned out to be for a multi-contract system, but the live Studio
+verification in §4 remains the authoritative proof this project relies
+on — the offline suite exists to catch regressions quickly, not to
+replace that live verification.
+
+`_extract_json_object` in `claim_verifier.py` and `dispute_panel.py`
+still carries the small, backward-compatible `isinstance(text, dict)`
+defensive branch added while debugging Direct Mode (see the prior
+version of this section in git history) — harmless and never exercised
+by this stub (which always returns a raw string from `exec_prompt`,
+matching real GenVM), so it was left in rather than churned again.
