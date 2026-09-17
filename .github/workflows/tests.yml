@@ -20,4 +20,6 @@ jobs:
           pip install pytest genlayer-test
 
       - name: Run offline tests
+        env:
+          GENVM_VERSION: v0.2.16
         run: pytest tests/ -v
