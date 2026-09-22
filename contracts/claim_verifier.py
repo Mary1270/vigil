@@ -31,6 +31,20 @@ def _extract_json_object(text) -> str:
     return t
 
 
+def _fetch_source(evidence_url: str) -> str:
+    """Actually fetch and normalize the evidence page's content. Must be
+    called from inside a run_nondet/eq_principle leader/validator
+    closure, since the fetch itself is nondeterministic and needs
+    consensus. Every fact-checking path grounds its verdict in this
+    real content instead of asking the LLM to "retrieve" a bare URL
+    itself (which it cannot actually do)."""
+    page = gl.nondet.web.render(evidence_url, mode="text")
+    text = page.strip()
+    if len(text) > 4000:
+        text = text[:4000]
+    return text
+
+
 TIER_HIGH = "high_reputation"
 TIER_MEDIUM = "medium_reputation"
 TIER_LOW = "low_reputation_or_unknown"
@@ -133,24 +147,23 @@ class ClaimVerifier(gl.Contract):
 
     def _resolve_medium(self, fact: str, evidence_url: str) -> str:
         def analyze() -> str:
+            source_text = _fetch_source(evidence_url)
             prompt = (
-                "You are verifying a factual claim under two independent "
-                "readings, then giving one final verdict.\n\n"
+                "You are verifying a factual claim strictly against the "
+                "fetched evidence content below. Do not rely on prior "
+                "knowledge of the topic -- judge only what this specific "
+                "content says.\n\n"
                 "Claim to verify:\n<fact>\n" + fact + "\n</fact>\n\n"
-                "Evidence source to check against:\n<source>\n" + evidence_url + "\n</source>\n\n"
-                "Step 1 - Retrieve and read the evidence source directly.\n"
-                "Step 2 - Independently judge whether the evidence source "
-                "supports the claim as stated. Answer CONFIRMED or "
-                "REJECTED.\n"
-                "Step 3 - Independently judge it a second time from a fresh "
-                "reading of the same source. Answer CONFIRMED or REJECTED.\n"
-                "Step 4 - If both readings agree, use that as the final "
-                "verdict. If they disagree, use REJECTED (a disagreement "
-                "can still be escalated on dispute).\n\n"
+                "Fetched evidence source content:\n<source_content>\n"
+                + source_text + "\n</source_content>\n\n"
+                "If the fetched content does not mention the claim at "
+                "all, or contradicts it, the verdict must be REJECTED. "
+                "Only use CONFIRMED if the content directly supports the "
+                "claim as stated.\n\n"
                 "Respond with strict JSON only, no other text, no markdown "
                 "fence:\n"
-                '{"reading_one": "CONFIRMED or REJECTED", '
-                '"reading_two": "CONFIRMED or REJECTED", '
+                '{"grounding": "<a short quote or precise paraphrase from '
+                'the fetched content that the verdict is based on>", '
                 '"final_verdict": "CONFIRMED or REJECTED"}'
             )
             raw = gl.nondet.exec_prompt(prompt)
@@ -158,7 +171,7 @@ class ClaimVerifier(gl.Contract):
 
         verdict_json = gl.eq_principle.prompt_comparative(
             analyze,
-            "Two-reading claim verification must reach the same final_verdict.",
+            "Verification grounded in the same fetched evidence content must reach the same final_verdict.",
         )
         try:
             parsed = json.loads(verdict_json)
@@ -171,21 +184,26 @@ class ClaimVerifier(gl.Contract):
 
     def _resolve_low(self, fact: str, evidence_url: str) -> str:
         def analyze() -> str:
+            source_text = _fetch_source(evidence_url)
             prompt = (
                 "You are the lead reviewer for a claim from a submitter with "
                 "low or no reputation history. Because the submitter is "
-                "unproven, apply the deepest available scrutiny before "
-                "producing a verdict.\n\n"
+                "unproven, apply the deepest available scrutiny, strictly "
+                "grounded in the fetched evidence content below -- do not "
+                "rely on prior knowledge of the topic.\n\n"
                 "Claim to verify:\n<fact>\n" + fact + "\n</fact>\n\n"
-                "Evidence source to check against:\n<source>\n" + evidence_url + "\n</source>\n\n"
-                "Retrieve the evidence source, analyze it in multiple steps "
-                "(what it directly states, what it implies, whether it could "
-                "be read to contradict the claim), and only then give a "
-                "final verdict.\n\n"
+                "Fetched evidence source content:\n<source_content>\n"
+                + source_text + "\n</source_content>\n\n"
+                "Analyze in multiple steps: (1) what the fetched content "
+                "directly states, (2) what it implies, (3) whether it "
+                "could be read to contradict the claim. If the fetched "
+                "content does not support the claim, the verdict must be "
+                "REJECTED.\n\n"
                 "Respond with strict JSON only, no other text, no markdown "
                 "fence:\n"
-                '{"reasoning": "<detailed step-by-step analysis, max 800 '
-                'chars>", "final_verdict": "CONFIRMED or REJECTED"}'
+                '{"reasoning": "<detailed step-by-step analysis grounded '
+                "in the fetched content, max 800 chars>\", "
+                '"final_verdict": "CONFIRMED or REJECTED"}'
             )
             raw = gl.nondet.exec_prompt(prompt)
             return _extract_json_object(raw)
@@ -194,13 +212,15 @@ class ClaimVerifier(gl.Contract):
             analyze,
             task=(
                 "Produce a thorough, multi-step factual verification of an "
-                "unproven submitter's claim, with reasoning and a final "
-                "verdict."
+                "unproven submitter's claim, grounded in fetched evidence "
+                "content, with reasoning and a final verdict."
             ),
             criteria=(
                 "The final_verdict must be exactly CONFIRMED or REJECTED, "
                 "must follow from the stated reasoning, and the reasoning "
-                "must explicitly reference the evidence source's content."
+                "must reference specific content actually present in the "
+                "fetched evidence source, not general knowledge of the "
+                "topic."
             ),
         )
         try:
