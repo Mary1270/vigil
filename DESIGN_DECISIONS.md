@@ -188,7 +188,17 @@ live is treated as settled going in.
 
 ## 6. Status
 
-Design finalized. No contract code written yet — next step is
-`ClaimVerifier`, `ReputationLedger`, and `DisputePanel`, in that
-dependency order reversed at deploy time (`ReputationLedger` first, since
-the other two depend on its address).
+Design finalized, all three contracts written, deployed, live-tested,
+and offline-tested (see LESSONS_LEARNED.md).
+
+**v1.1 addendum:** steward review found two real issues, both fixed —
+see LESSONS_LEARNED.md §8 for the full account. In short: (1) the
+medium/low/dispute-review paths judged claims against a bare evidence
+URL instead of actually fetching it, now fixed with a shared
+`_fetch_source` helper used by every fact-checking path; (2)
+`DisputePanel.review_dispute` had no caller authorization, now
+restricted to the registered `ClaimVerifier` address with independent
+replay protection. Neither change affects the architecture or EP
+justification above — the mechanism described in §1/§2 is unchanged;
+only the grounding of each path's verdict and the authorization of one
+cross-contract callback were tightened.

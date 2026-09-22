@@ -93,11 +93,15 @@ the ledger → `set_dispute_panel` on the ledger → `set_dispute_panel` on
 `ClaimVerifier`. All six steps returned `SUCCESS`/`Accepted` on the first
 attempt, with no reordering needed.
 
-## 6. Final deployed addresses for Vigil (Studio, Sep 17 2026)
+## 6. Final deployed addresses for Vigil (Studio, Sep 17 2026) — superseded by v1.1, see §8
 
 - `ReputationLedger`: `0x9544144caf6ACe52c5BCE6effE8b05dE0fAf0C3e`
 - `ClaimVerifier`: `0xc280b1029dFB4167f24BbecC1C893137E4B432b8`
 - `DisputePanel`: `0x08B886927Dc77CA1B1d745ED6DB8e54e7C08F559`
+
+These were the v1.0 addresses, deployed before the steward-feedback fix
+in §8. They remain live but run source without the grounding/
+authorization fixes — use the §8 addresses instead.
 
 ## 7. Offline test harness — final approach (genlayer-test's Direct Mode abandoned)
 
@@ -165,6 +169,7 @@ final scores from §4 above (500 → 530 → 550 → 530 → 520). Every test
 was actually executed (not just syntax-checked) before being pushed,
 using a minimal local harness standing in for `pytest.raises`, since
 this environment itself has no network access to install real `pytest`.
+(Updated to 25 tests after the v1.1 fix in §8 below.)
 
 One honest limitation of this approach, stated plainly: this stub is a
 hand-written approximation of the real SDK's semantics, not the real
@@ -180,3 +185,95 @@ defensive branch added while debugging Direct Mode (see the prior
 version of this section in git history) — harmless and never exercised
 by this stub (which always returns a raw string from `exec_prompt`,
 matching real GenVM), so it was left in rather than churned again.
+
+## 8. v1.1 — steward feedback and fix
+
+The v1.0 submission was rejected with two findings, both real and both
+fixed:
+
+**1. Verdicts were not grounded in fetched evidence.** `_resolve_medium`,
+`_resolve_low`, and `DisputePanel._review` each built a prompt that
+included the evidence URL as plain text and asked the LLM to "retrieve"
+it itself — but an LLM prompt cannot actually fetch a URL; only
+`_resolve_high`'s `strict_eq` path called `gl.nondet.web.render`. This
+meant the medium/low/dispute paths' verdicts were effectively based on
+the LLM's own guess about the URL, not on the page's real content. Fixed
+by adding a shared `_fetch_source(evidence_url)` helper (calls
+`gl.nondet.web.render` inside the same leader/validator closure as the
+LLM call, truncated to 4000 chars) and rewriting every prompt to include
+the actual fetched content, with explicit instructions to judge only
+that content and default to REJECTED if the content doesn't support the
+claim.
+
+**2. `DisputePanel.review_dispute` had no caller authorization.** It
+accepted `claim_id`, `claimant`, and a raw `claim_json` string from
+`ClaimVerifier`'s `.emit()` call, but nothing checked that the caller
+*was* `ClaimVerifier` — any account could call `review_dispute` directly
+with a fabricated `claim_json` and manipulate a claimant's reputation
+with no authorization at all. Fixed with two changes: (a) a new
+`set_claim_verifier` wiring step on `DisputePanel` (owner-gated,
+call-once, matching the existing pattern on `ReputationLedger`), and a
+check in `review_dispute` that `gl.message.sender_address` equals the
+registered `ClaimVerifier` address; (b) independent replay protection —
+a `processed_claims: TreeMap[u256, bool]` on `DisputePanel` itself,
+checked and marked before doing any review work, so the same `claim_id`
+can never be processed twice by `DisputePanel` even if `ClaimVerifier`'s
+own `disputed`-flag guard were ever bypassed.
+
+**Wiring order changed** (see README.md): a 7th step,
+`panel.set_claim_verifier(verifier_address)`, is now required after the
+existing 6 steps.
+
+**Redeployment required.** Both `claim_verifier.py` and
+`dispute_panel.py` changed, so the v1.0 addresses in this file and in
+README.md no longer match the deployed bytecode's actual behavior for
+the fixed paths. A fresh three-contract deploy-and-wire (all 7 steps)
+and a fresh live end-to-end verification were required; see the updated
+addresses and sequence in §4/§6 once redeployed.
+
+**Four new regression tests** were added to lock in both fixes offline:
+`test_medium_tier_verdict_is_grounded_in_fetched_content` and
+`test_dispute_review_is_grounded_in_fetched_content` assert
+`gl.nondet.web.render` is actually called with the claim's evidence URL;
+`test_review_dispute_rejects_calls_not_from_claim_verifier` and
+`test_review_dispute_rejects_replayed_claim_id` assert the new
+authorization and replay-protection checks reject exactly the two attack
+shapes described above. All 25 offline tests were re-run (not just
+syntax-checked) after the fix and pass.
+
+**Redeployed and re-verified live on Studio**, same day. New addresses:
+
+- `ReputationLedger`: `0x3119Ca64573cdBF0865136B064c8Fa19D4C8582A`
+- `ClaimVerifier`: `0x1567c2C62fAfe8a1D71D664EF6889E1BD610Af57`
+- `DisputePanel`: `0x63f2f963BF5fB602A8172942C4e5373349577d5B`
+
+The full 7-step deploy-and-wire sequence (README.md) completed cleanly,
+including the new `panel.set_claim_verifier` step. The live end-to-end
+sequence (500 → 530 → 550 → 530 → 520, same numbers as v1.0, since the
+fix changes *how* a verdict is grounded, not the mechanism's arithmetic)
+was re-run and confirmed the fix directly:
+
+- The low-tier `CONFIRMED` verdict's `reasoning` field quoted actual
+  sentences from the fetched Wikipedia "Paris" page ("Paris is the
+  capital and largest city of France", etc.) rather than a generic
+  restatement — visible, on-chain proof the page was really fetched.
+- The medium-tier `CONFIRMED` and `REJECTED` verdicts' `grounding`
+  fields likewise quoted the actually-fetched "Tokyo" page content.
+- The dispute review's three-framing output unanimously agreed
+  `REJECTED`, correctly grounded in the real (unrelated-to-France)
+  fetched page content — confirming `DisputePanel` also now fetches
+  real evidence rather than trusting a bare URL.
+- `review_dispute`'s new authorization check was exercised implicitly:
+  the only successful call came from `ClaimVerifier`'s own `.emit()`,
+  matching `gl.message.sender_address` to the registered
+  `claim_verifier` address as designed.
+
+**Directly tested the attack the fix closes.** A direct call to
+`DisputePanel.review_dispute` from an ordinary wallet (not through
+`ClaimVerifier`), with a fabricated `claim_json` (`claim_id: 999`,
+invented facts, `delta_magnitude: 100`), was rejected by real GenVM
+consensus with `Result Code: Rollback` and
+`Error Message: "only the registered ClaimVerifier may call
+review_dispute"`. This confirms live, on real GenVM, that the exact
+vulnerability the steward flagged — anyone manipulating reputation via
+a fabricated dispute call — is closed.
