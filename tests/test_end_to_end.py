@@ -5,20 +5,16 @@ the same tier transitions, and the same final scores, run here offline
 against the real cross-contract logic via the stub.
 """
 import json
-from unittest.mock import patch
 
-from _bootstrap import make_wired, set_caller, CLAIMANT_ADDRESS
-from genlayer import gl
+from _bootstrap import make_wired, set_caller, mock_llm_and_page, CLAIMANT_ADDRESS
 
 
-def _non_comparative(verdict):
-    return json.dumps({"reasoning": "step-by-step analysis", "final_verdict": verdict})
+def _confirmed():
+    return json.dumps({"grounding": "step-by-step analysis", "final_verdict": "CONFIRMED"})
 
 
-def _comparative(verdict):
-    return json.dumps({
-        "reading_one": verdict, "reading_two": verdict, "final_verdict": verdict,
-    })
+def _rejected():
+    return json.dumps({"grounding": "step-by-step analysis", "final_verdict": "REJECTED"})
 
 
 def _three_framing(verdict):
@@ -33,7 +29,7 @@ def test_full_lifecycle_matches_live_studio_verification():
     set_caller(CLAIMANT_ADDRESS)
 
     # Step 1 (live: claim 0) -- no history -> low tier -> CONFIRMED -> 500 -> 530
-    with patch.object(gl.nondet, "exec_prompt", return_value=_non_comparative("CONFIRMED")):
+    with mock_llm_and_page(_confirmed(), page_text="Paris is the capital of France."):
         claim0 = verifier.submit_claim(
             "Paris is the capital of France.", "https://example.test/paris"
         )
@@ -43,7 +39,7 @@ def test_full_lifecycle_matches_live_studio_verification():
     assert ledger.get_score(CLAIMANT_ADDRESS) == 530
 
     # Step 2 (live: claim 1) -- reputation 530 -> medium tier -> CONFIRMED -> 530 -> 550
-    with patch.object(gl.nondet, "exec_prompt", return_value=_comparative("CONFIRMED")):
+    with mock_llm_and_page(_confirmed(), page_text="Tokyo is the capital of Japan."):
         claim1 = verifier.submit_claim(
             "Tokyo is the capital of Japan.", "https://example.test/tokyo"
         )
@@ -52,7 +48,7 @@ def test_full_lifecycle_matches_live_studio_verification():
     assert ledger.get_score(CLAIMANT_ADDRESS) == 550
 
     # Step 3 (live: claim 2) -- false fact -> medium tier -> REJECTED -> 550 -> 530
-    with patch.object(gl.nondet, "exec_prompt", return_value=_comparative("REJECTED")):
+    with mock_llm_and_page(_rejected(), page_text="Tokyo is the capital of Japan."):
         claim2 = verifier.submit_claim(
             "Tokyo is the capital of France.", "https://example.test/tokyo"
         )
@@ -61,7 +57,7 @@ def test_full_lifecycle_matches_live_studio_verification():
     assert ledger.get_score(CLAIMANT_ADDRESS) == 530
 
     # Step 4 (live: dispute 0) -- panel denies the dispute -> extra penalty -> 530 -> 520
-    with patch.object(gl.nondet, "exec_prompt", return_value=_three_framing("REJECTED")):
+    with mock_llm_and_page(_three_framing("REJECTED"), page_text="Tokyo is the capital of Japan."):
         verifier.request_dispute(claim2)
     dispute0 = json.loads(panel.get_dispute(0))
     assert dispute0["overturned"] is False

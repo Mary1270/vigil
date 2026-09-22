@@ -34,6 +34,20 @@ ClaimVerifier = _verifier_module.ClaimVerifier
 DisputePanel = _panel_module.DisputePanel
 
 from genlayer import gl, Address, register_contract, clear_registry  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
+from unittest.mock import patch  # noqa: E402
+
+
+@contextmanager
+def mock_llm_and_page(llm_response, page_text="Fetched page content for testing."):
+    """Mock both the evidence page fetch and the LLM call together,
+    since every fact-checking path now fetches the page before
+    prompting (see the steward-feedback fix recorded in
+    LESSONS_LEARNED.md: verdicts must be grounded in real fetched
+    content, not just a bare URL passed to the LLM)."""
+    with patch.object(gl.nondet.web, "render", return_value=page_text), \
+         patch.object(gl.nondet, "exec_prompt", return_value=llm_response):
+        yield
 
 # Fixed, valid, distinct addresses reused across test files.
 LEDGER_ADDRESS = "0x" + "aa" * 20
@@ -81,5 +95,7 @@ def make_wired():
     ledger.set_dispute_panel(PANEL_ADDRESS)
     set_caller(OWNER_ADDRESS)
     verifier.set_dispute_panel(PANEL_ADDRESS)
+    set_caller(OWNER_ADDRESS)
+    panel.set_claim_verifier(VERIFIER_ADDRESS)
 
     return ledger, verifier, panel
